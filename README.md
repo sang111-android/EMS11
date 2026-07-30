@@ -1,6 +1,6 @@
-کانال یوتوب : [https://www.youtube.com/@X4GHUB](https://www.youtube.com/@X4GHUB)
+ساازنده : https://github.com/EMS115110 
 
-# 🚀 X4G
+# 🚀 Panel
 
 دروازه (Gateway) سریع و مدرن برای تونل‌زنی VLESS روی WebSocket و XHTTP + HTTP Proxy، با داشبورد مدیریتی زیبا، **ربات مدیریت تلگرام**، صفحات ساب حرفه‌ای و قابلیت ساخت لینک‌های اختصاصی با محدودیت ترافیک، سرعت و آی‌پی.
 
@@ -101,4 +101,3 @@
 
 ---
 
-X4G · پشتیبانی: [@Farajian2004f](https://t.me/Farajian2004f)
