@@ -136,6 +136,22 @@ DEFAULT_ALPN_BY_PROTOCOL = {
     # auto روی h2 به stream-one می‌رود و روی http/1.1 به packet-up برمی‌گردد
     "xhttp-auto": "h2,http/1.1",
 }
+# xmux برای مدهای XHTTP: کلاینت Xray چندین اتصال HTTP/2 موازی باز می‌کند و
+# جریان‌ها را روی آن‌ها پخش می‌کند → پهنای باند بیشتر (به قیمت مصرف بیشتر).
+# کلاینت‌های قدیمی که extra را نمی‌شناسند ساده نادیده‌اش می‌گیرند.
+XHTTP_EXTRA_JSON = json.dumps(
+    {
+        "xmux": {
+            "maxConcurrency": "16-32",
+            "maxConnections": "4-8",
+            "cMaxReuseTimes": "64-128",
+            "hMaxRequestTimes": "800-900",
+            "hKeepAlivePeriod": 45,
+        }
+    },
+    separators=(",", ":"),
+)
+
 DEFAULT_PORT = 443
 MIN_PORT, MAX_PORT = 1, 65535
 
@@ -254,7 +270,9 @@ def generate_vless_link(
         port_val = DEFAULT_PORT
 
     if protocol == "vless-ws":
-        path = f"/ws/{uuid}"
+        # ed=2048 → Early Data: کلاینت اولین پکت را در خود دست‌دادن WebSocket می‌فرستد
+        # → یک RTT کمتر در باز شدن هر اتصال (سرور این حالت را پشتیبانی می‌کند).
+        path = f"/ws/{uuid}?ed=2048"
         params = {
             "encryption": "none",
             "security": "tls",
@@ -279,6 +297,8 @@ def generate_vless_link(
             "sni": host,
             "fp": fp,
             "alpn": alpn_val,
+            # xmux: کلاینت چندین اتصال HTTP/2 موازی باز می‌کند و جریان‌ها را پخش می‌کند
+            "extra": XHTTP_EXTRA_JSON,
         }
     query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
     return f"vless://{uuid}@{host}:{port_val}?{query}#{quote(remark)}"
@@ -718,7 +738,7 @@ async def get_connections(_=Depends(require_auth)):
 
     return {
         "connections": result,
-        "count": len(result),          # تعداد آی‌پی‌های یکتا
+        "count": len(result),          # تعداد آی‌پی‌های ی��تا
         "raw_count": len(connections), # تعداد کل اتصالات باز (بدون گروه‌بندی)
     }
 
@@ -1143,5 +1163,36 @@ async def test_ws_redirect():
     return HTMLResponse(content="<script>location.href='/dashboard'</script>")
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=CONFIG["port"], log_level="info", workers=1)
+    # تیون سرور برای حداکثر توان عبوری:
+    #  • uvloop + httptools اگر نصب باشند (حدود ۲برابر سریع‌تر از حلقه‌ی پیش‌فرض)
+    #  • ws_max_size بزرگ تا فریم‌های چندمگابایتی تکه‌تکه نشوند
+    #  • ping خودکار خاموش (ترافیک و وقفه‌ی اضافی نداشته باشیم)
+    #  • backlog بزرگ برای موج اتصال‌های موازی
+    _loop = "auto"
+    _http = "auto"
+    try:
+        import uvloop  # noqa: F401
+        _loop = "uvloop"
+    except Exception:
+        pass
+    try:
+        import httptools  # noqa: F401
+        _http = "httptools"
+    except Exception:
+        pass
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=CONFIG["port"],
+        log_level="info",
+        workers=1,
+        loop=_loop,
+        http=_http,
+        ws="websockets",
+        ws_max_size=32 * 1024 * 1024,
+        ws_ping_interval=None,
+        ws_ping_timeout=None,
+        backlog=4096,
+        timeout_keep_alive=75,
+    )
     
