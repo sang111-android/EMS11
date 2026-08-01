@@ -22,13 +22,18 @@ from main import (
     log_activity,
     now_ir,
 )
-from speed_limit import throttle
+from speed_limit import throttle, QuotaGate
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VLESS Relay — بهینه‌شده برای حداکثر throughput
+# منطق تونل دست‌نخورده است؛ دو بهینه‌سازی اضافه شده:
+#   ۱) حسابرسی کوتا با QuotaGate (batch) به‌جای گرفتن قفل سراسری LINKS به‌ازای هر چانک
+#   ۲) تیون سوکت مقصد (TCP_NODELAY + بافرهای بزرگ)
+# در پایان هر مسیر flush() انجام می‌شود تا مصرف ثبت‌شده دقیق بماند.
 # ══════════════════════════════════════════════════════════════════════════════
 
-RELAY_BUF = 256 * 1024   # 256 KB buffer
+RELAY_BUF = 256 * 1024        # بافر خواندن/آستانه‌ی drain
+SOCK_BUF_SIZE = 4 * 1024 * 1024   # SO_SNDBUF / SO_RCVBUF سوکت مقصد
 
 def _ws_client_ip(ws: WebSocket) -> str:
     fwd = ws.headers.get("x-forwarded-for")
@@ -73,6 +78,8 @@ async def check_and_use(uid: str, n: int) -> bool:
     return True
 
 async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
+    gate = QuotaGate(uid, check_and_use)
+    conn = connections.get(conn_id)
     try:
         while True:
             msg = await ws.receive()
@@ -81,12 +88,14 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             data = msg.get("bytes") or (msg.get("text") or "").encode()
             if not data:
                 continue
-            if not await check_and_use(uid, len(data)):
+            n = len(data)
+            if not await gate.add(n):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
-            await throttle(uid, len(data))
+            await throttle(uid, n)
             stats["total_requests"] += 1
-            connections[conn_id]["bytes"] += len(data)
+            if conn is not None:
+                conn["bytes"] += n
             writer.write(data)
             if writer.transport.get_write_buffer_size() > RELAY_BUF:
                 await writer.drain()
@@ -94,27 +103,40 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
         pass
     finally:
         try:
+            await gate.flush()
+        except Exception:
+            pass
+        try:
             writer.write_eof()
         except Exception:
             pass
 
 async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str):
     first = True
+    gate = QuotaGate(uid, check_and_use)
+    conn = connections.get(conn_id)
     try:
         while True:
             data = await reader.read(RELAY_BUF)
             if not data:
                 break
-            if not await check_and_use(uid, len(data)):
+            n = len(data)
+            if not await gate.add(n):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
-            await throttle(uid, len(data))
-            connections[conn_id]["bytes"] += len(data)
+            await throttle(uid, n)
+            if conn is not None:
+                conn["bytes"] += n
             payload = (b"\x00\x00" + data) if first else data
             first = False
             await ws.send_bytes(payload)
     except Exception:
         pass
+    finally:
+        try:
+            await gate.flush()
+        except Exception:
+            pass
 
 async def websocket_tunnel(ws: WebSocket, uuid: str):
     await ws.accept()
@@ -172,7 +194,12 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         sock = writer.transport.get_extra_info('socket')
         if sock:
             import socket
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCK_BUF_SIZE)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCK_BUF_SIZE)
+            except OSError:
+                pass
 
         if payload:
             writer.write(payload)

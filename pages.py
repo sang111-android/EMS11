@@ -371,7 +371,7 @@ a{color:inherit;text-decoration:none}
 .chip{font-size:10.5px;font-weight:700;padding:5px 12px;border-radius:8px;background:var(--accent-d);color:var(--t2);border:1px solid var(--card-b);cursor:pointer;transition:.15s;white-space:nowrap}
 .chip:hover{background:rgba(24,155,173,.18);color:var(--accent2)}
 .chip.active{background:var(--accent);color:#fff;border-color:var(--accent);box-shadow:0 3px 10px rgba(24,155,173,.35)}
-.proto-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+.proto-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:9px}
 .proto-card{border:1.5px solid var(--card-b);border-radius:13px;padding:13px 12px;cursor:pointer;transition:.18s;text-align:center;position:relative;background:rgba(0,0,0,.1)}
 [data-theme="light"] .proto-card{background:#fff}
 .proto-card:hover{border-color:var(--card-bh);transform:translateY(-1px)}
@@ -658,6 +658,7 @@ a{color:inherit;text-decoration:none}
 .pc-ws{background:var(--accent-d);color:var(--accent2)}
 .pc-xhttp{background:var(--purple-bg);color:#D8705A}
 .pc-ultra{background:var(--green-bg);color:var(--green-t)}
+.pc-auto{background:var(--accent-d);color:var(--accent)}
 .cfg-sub-tag{font-size:9.5px;color:var(--t3);display:flex;align-items:center;gap:4px;white-space:nowrap}
 .cfg-sub-tag i{color:var(--purple);font-size:11px}
 .tog{width:19px;height:30px;border-radius:19px;background:rgba(120,124,125,0.25);position:relative;cursor:pointer;transition:.2s;flex-shrink:0;border:none}
@@ -684,7 +685,7 @@ a{color:inherit;text-decoration:none}
   .cfg-actions{flex-wrap:wrap;border-top:1px solid var(--card-b);padding-top:10px;margin-top:2px;width:100%}
 }
 
-/* ══════ active connections with IP ══════ */
+/* ══════ active connections with IP ���═════ */
 .conn-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
 .conn-card{background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:15px 17px;transition:.2s;position:relative;overflow:hidden}
 .conn-card:hover{border-color:var(--card-bh);transform:translateY(-1px)}
@@ -1063,6 +1064,8 @@ body{font-size:14.5px}
           <option value="vless-ws">VLESS / WebSocket</option>
           <option value="xhttp-packet-up">XHTTP Ultra · packet-up</option>
           <option value="xhttp-stream-up">XHTTP Ultra · stream-up</option>
+          <option value="xhttp-stream-one">XHTTP Ultra · stream-one</option>
+          <option value="xhttp-auto">XHTTP Ultra · auto</option>
         </select>
         <div class="proto-cards">
           <div class="proto-card active" data-val="vless-ws" onclick="selectProto('vless-ws',this)">
@@ -1082,6 +1085,18 @@ body{font-size:14.5px}
             <div class="proto-card-icon"><i class="ti ti-rocket"></i></div>
             <div class="proto-card-title">XHTTP · stream-up</div>
             <div class="proto-card-desc">Lower latency</div>
+          </div>
+          <div class="proto-card" data-val="xhttp-stream-one" onclick="selectProto('xhttp-stream-one',this)">
+            <div class="proto-card-check"><i class="ti ti-check"></i></div>
+            <div class="proto-card-icon"><i class="ti ti-arrows-exchange"></i></div>
+            <div class="proto-card-title">XHTTP · stream-one</div>
+            <div class="proto-card-desc">Full-duplex, fastest · needs HTTP/2</div>
+          </div>
+          <div class="proto-card" data-val="xhttp-auto" onclick="selectProto('xhttp-auto',this)">
+            <div class="proto-card-check"><i class="ti ti-check"></i></div>
+            <div class="proto-card-icon"><i class="ti ti-wand"></i></div>
+            <div class="proto-card-title">XHTTP · auto</div>
+            <div class="proto-card-desc">stream-one on H2, packet-up fallback</div>
           </div>
         </div>
       </div>
@@ -1446,7 +1461,7 @@ function expChip(exp,expired){
   return `<span class="exp-chip ec-ok"><i class="ti ti-calendar-check"></i> ${toFa(d)} days left</span>`;
 }
 function protoBadge(p){
-  const m={'vless-ws':['VLESS · WS','pc-ws'],'xhttp-packet-up':['XHTTP · packet-up','pc-xhttp'],'xhttp-stream-up':['XHTTP · stream-up','pc-xhttp'],'xhttp-stream-one':['XHTTP ULTRA','pc-ultra']};
+  const m={'vless-ws':['VLESS · WS','pc-ws'],'xhttp-packet-up':['XHTTP · packet-up','pc-xhttp'],'xhttp-stream-up':['XHTTP · stream-up','pc-xhttp'],'xhttp-stream-one':['XHTTP · stream-one','pc-ultra'],'xhttp-auto':['XHTTP · auto','pc-auto']};
   const v=m[p]||m['vless-ws'];
   return `<span class="proto-chip ${v[1]}">${v[0]}</span>`;
 }
@@ -2386,8 +2401,9 @@ function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&l
 function fmtB(b){if(!b||b===0)return '0 B';if(b<1024)return b+' B';if(b<1024**2)return (b/1024).toFixed(1)+' KB';if(b<1024**3)return (b/1024**2).toFixed(2)+' MB';return (b/1024**3).toFixed(2)+' GB'}
 function nowTime(){return new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}
 function protoChip(p){
-  if(p==='xhttp-stream-one')return '<span class="chip chip-proto"><i class="ti ti-bolt"></i> XHTTP Ultra</span>';
-  if(p&&p.startsWith('xhttp'))return '<span class="chip chip-proto">'+esc(p)+'</span>';
+  if(p==='xhttp-stream-one')return '<span class="chip chip-proto"><i class="ti ti-arrows-exchange"></i> XHTTP · stream-one</span>';
+  if(p==='xhttp-auto')return '<span class="chip chip-proto"><i class="ti ti-wand"></i> XHTTP · auto</span>';
+  if(p&&p.startsWith('xhttp'))return '<span class="chip chip-proto"><i class="ti ti-bolt"></i> '+esc(p.replace('xhttp-','XHTTP · '))+'</span>';
   return '<span class="chip chip-proto">VLESS · WS</span>';
 }
 function copyText(text,msg){

@@ -119,7 +119,7 @@ SUBS: dict = {}
 SUBS_LOCK = asyncio.Lock()
 
 # پروتکل‌های پشتیبانی‌شده برای هر کانفیگ
-PROTOCOLS = ("vless-ws", "xhttp-packet-up", "xhttp-stream-up", "xhttp-stream-one")
+PROTOCOLS = ("vless-ws", "xhttp-packet-up", "xhttp-stream-up", "xhttp-stream-one", "xhttp-auto")
 DEFAULT_PROTOCOL = "vless-ws"
 
 # Fingerprint (uTLS) های قابل انتخاب برای هر کانفیگ
@@ -131,7 +131,10 @@ DEFAULT_ALPN_BY_PROTOCOL = {
     "vless-ws": "http/1.1",
     "xhttp-packet-up": "h2,http/1.1",
     "xhttp-stream-up": "h2,http/1.1",
-    "xhttp-stream-one": "h2,http/1.1",
+    # stream-one ذاتاً دوطرفه است و فقط روی HTTP/2 کار می‌کند؛ http/1.1 را تبلیغ نمی‌کنیم
+    "xhttp-stream-one": "h2",
+    # auto روی h2 به stream-one می‌رود و روی http/1.1 به packet-up برمی‌گردد
+    "xhttp-auto": "h2,http/1.1",
 }
 DEFAULT_PORT = 443
 MIN_PORT, MAX_PORT = 1, 65535
@@ -306,12 +309,14 @@ def parse_size_to_bytes(value: float, unit: str) -> int:
 
 def parse_speed_to_bytes(value: float, unit: str) -> int:
     """محدودیت سرعت رو به بایت‌بر‌ثانیه تبدیل می‌کنه.
-    واحدهای پشتیبانی‌شده: MBIT (مگابیت‌بر‌ثانیه، رایج‌ترین)، KB (کیلوبایت‌بر‌ثانیه)، MB (مگابایت‌بر‌ثانیه)."""
+    واحدهای پشتیبانی‌شده: MBIT (مگابیت‌بر‌ثانیه، رایج‌ترین)، KB (کیلوبایت‌بر‌ثانیه)، MB (مگابایت‌بر‌ثانیه).
+    دقت: Mbps در شبکه واحد دهدهیه (۱ Mbps = ۱۰^۶ بیت‌بر‌ثانیه)، نه ۲^۲۰.
+    قبلاً از ۱۰۲۴×۱۰۲۴ استفاده می‌شد که حدود ۵٪ سرعت رو بیشتر از مقدار تنظیم‌شده می‌داد."""
     if value <= 0:
         return 0
     unit = (unit or "MBIT").upper()
     if unit == "MBIT":
-        return int(value * 1024 * 1024 / 8)
+        return int(value * 1_000_000 / 8)
     if unit == "KB":
         return int(value * 1024)
     if unit == "MB":
@@ -780,6 +785,12 @@ async def remove_link(uid: str) -> str | None:
                 ids = SUBS[sub_id].get("link_ids", [])
                 if uid in ids:
                     ids.remove(uid)
+    # باکت محدودیت سرعت هم آزاد بشه (جلوگیری از رشد حافظه بعد از حذف‌های مکرر)
+    try:
+        from speed_limit import reset_bucket
+        reset_bucket(uid)
+    except Exception:
+        pass
     asyncio.create_task(save_state())
     log_activity("link", f"کانفیگ «{label}» حذف شد", "err")
     return label

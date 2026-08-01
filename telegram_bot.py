@@ -60,7 +60,8 @@ PROTOCOL_LABELS = {
     "vless-ws": "VLESS + WebSocket",
     "xhttp-packet-up": "XHTTP (packet-up)",
     "xhttp-stream-up": "XHTTP (stream-up)",
-    "xhttp-stream-one": "XHTTP (stream-one)",
+    "xhttp-stream-one": "XHTTP (stream-one) ⚡ دوطرفه",
+    "xhttp-auto": "XHTTP (auto) 🪄 انتخاب خودکار",
 }
 
 def _protocol_label(p: str) -> str:
@@ -254,7 +255,7 @@ def _wizard_prompt(step: str, data: dict) -> str:
     if step == "iplimit":
         return head + "👥 حداکثر تعداد آی‌پی/کاربر هم‌زمان مجاز رو بفرست\nیا دکمه‌ی نامحدود رو بزن:"
     if step == "days":
-        return head + "📅 تعداد روزهای اعتبار کانفیگ رو بفرست\nیا دکمه‌ی نامحدود (بدون انقضا) رو بزن:"
+        return head + "📅 تعداد روزهای ��عتبار کانفیگ رو بفرست\nیا دکمه‌ی نامحدود (بدون انقضا) رو بزن:"
     return head
 
 def _wizard_summary(data: dict) -> str:
