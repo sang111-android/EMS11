@@ -141,12 +141,14 @@ DEFAULT_ALPN_BY_PROTOCOL = {
 # کلاینت‌های قدیمی که extra را نمی‌شناسند ساده نادیده‌اش می‌گیرند.
 XHTTP_EXTRA_JSON = json.dumps(
     {
+        # حجم مصرفی مهم نیست → xmux تهاجمی: تا ۱۶ اتصال HTTP/2 موازی،
+        # هر کدام تا ۶۴ جریان هم‌زمان، با keep-alive کوتاه‌تر و چرخش بیشتر.
         "xmux": {
-            "maxConcurrency": "16-32",
-            "maxConnections": "4-8",
-            "cMaxReuseTimes": "64-128",
+            "maxConcurrency": "32-64",
+            "maxConnections": "8-16",
+            "cMaxReuseTimes": "128-256",
             "hMaxRequestTimes": "800-900",
-            "hKeepAlivePeriod": 45,
+            "hKeepAlivePeriod": 30,
         }
     },
     separators=(",", ":"),
@@ -1168,6 +1170,16 @@ if __name__ == "__main__":
     #  • ws_max_size بزرگ تا فریم‌های چندمگابایتی تکه‌تکه نشوند
     #  • ping خودکار خاموش (ترافیک و وقفه‌ی اضافی نداشته باشیم)
     #  • backlog بزرگ برای موج اتصال‌های موازی
+    #  • GC تنبل (آستانه‌ی بزرگ + freeze) تا مکث‌های جمع‌آوری حافظه وسط ترافیک سنگین نیفتد
+    #  • فشرده‌سازی WebSocket خاموش (ترافیک رمزشده قابل فشرده‌سازی نیست و فقط CPU می‌سوزاند)
+    import gc
+    gc.collect()
+    gc.set_threshold(100_000, 200, 200)
+    try:
+        gc.freeze()
+    except Exception:
+        pass
+
     _loop = "auto"
     _http = "auto"
     try:
@@ -1180,7 +1192,42 @@ if __name__ == "__main__":
         _http = "httptools"
     except Exception:
         pass
-    uvicorn.run(
+    # سوکت listen را خودمان می‌سازیم تا بتوانیم بافرها و کنترل ازدحام را روی آن تنظیم کنیم؛
+    # هر اتصال WebSocket پذیرفته‌شده این تنظیمات را ارث می‌برد → مسیر دانلود به کلاینت پهن می‌شود.
+    import socket as _socket
+
+    _listen_sock = None
+    try:
+        _listen_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        _listen_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        _listen_sock.bind(("0.0.0.0", CONFIG["port"]))
+        _listen_sock.listen(8192)
+        _listen_sock.set_inheritable(True)
+        for _opt, _val in (
+            (_socket.SO_SNDBUF, 16 * 1024 * 1024),
+            (_socket.SO_RCVBUF, 16 * 1024 * 1024),
+        ):
+            try:
+                _listen_sock.setsockopt(_socket.SOL_SOCKET, _opt, _val)
+            except OSError:
+                pass
+        _cc = getattr(_socket, "TCP_CONGESTION", None)
+        if _cc is not None:
+            for _algo in (b"bbr", b"cubic"):
+                try:
+                    _listen_sock.setsockopt(_socket.IPPROTO_TCP, _cc, _algo)
+                    break
+                except OSError:
+                    continue
+    except Exception:
+        if _listen_sock is not None:
+            try:
+                _listen_sock.close()
+            except Exception:
+                pass
+        _listen_sock = None
+
+    _config = uvicorn.Config(
         "main:app",
         host="0.0.0.0",
         port=CONFIG["port"],
@@ -1189,10 +1236,18 @@ if __name__ == "__main__":
         loop=_loop,
         http=_http,
         ws="websockets",
-        ws_max_size=32 * 1024 * 1024,
+        ws_max_size=64 * 1024 * 1024,
         ws_ping_interval=None,
         ws_ping_timeout=None,
-        backlog=4096,
-        timeout_keep_alive=75,
+        ws_per_message_deflate=False,
+        backlog=8192,
+        timeout_keep_alive=120,
+        limit_concurrency=None,
+        limit_max_requests=None,
     )
+    _server = uvicorn.Server(_config)
+    if _listen_sock is not None:
+        _server.run(sockets=[_listen_sock])
+    else:
+        _server.run()
     

@@ -29,6 +29,25 @@
 - هدر VLESS می‌تواند تکه‌تکه برسد → تجمیع ایمن تا سقف ۱۶KB و پارس مقاوم در برابر داده‌ی ناقص (قبلاً فرض می‌شد کل هدر در یک فریم است).
 - حجم دقیقاً یک‌بار شمرده می‌شود و دسترسی به رکورد اتصال پس از بسته شدن خطا نمی‌دهد.
 
+---
+
+# پاس دوم بهینه‌سازی — فقط مسیر WebSocket
+
+۱. **ادغام فریم‌ها (coalescing)** در مسیر دانلود: هر چه همان لحظه در بافر مقصد هست در یک فریم WS (تا ۸MB) فرستاده می‌شود → تعداد فریم و syscall چندبرابر کمتر، بدون ذره‌ای انتظار اضافی.
+۲. **`limit=8MB` روی StreamReader**: پیش‌فرض asyncio فقط ۶۴KB است و روی خط پرسرعت گلوگاه واقعی بود. (مهم‌ترین تک‌خط این پاس)
+۳. **BBR** روی سوکت مقصد، سوکت کلاینت و سوکت listen (با fallback به cubic). روی خطوط پرتلفات ایران معمولاً بزرگ‌ترین جهش واقعی را می‌دهد.
+۴. **سوکت listen دستی**: بافرهای ۱۶MB و BBR روی سوکت شنونده تنظیم می‌شود و **هر اتصال پذیرفته‌شده آن را ارث می‌برد** — چون uvicorn سوکت کلاینت را مستقیم در اختیار اپ نمی‌گذارد، مسیر دانلود به کلاینت تا الان تیون نمی‌شد.
+۵. **دسترسی مستقیم به سوکت کلاینت** از دل پروتکل ASGI به‌عنوان مسیر دوم (NODELAY + بافر + QUICKACK + LOWDELAY).
+۶. **فشرده‌سازی WS خاموش** (`ws_per_message_deflate=False`): ترافیک رمزشده فشرده نمی‌شود و این فقط CPU می‌سوزاند.
+۷. **`TCP_NOTSENT_LOWAT`** و **IPTOS_LOWDELAY**: تاخیر پایین بدون فدا کردن توان عبوری.
+۸. **۲ تلاش موازی حتی با یک IP** (قبلاً فقط روی IPهای متفاوت)، و فاصله‌ی تلاش‌ها ۱۲۰ms → ۶۰ms، تا ۴ تلاش.
+۹. بافرها: خواندن تا **۸MB**، سوکت **۱۶MB**، `ws_max_size` **۶۴MB**، backlog **۸۱۹۲**.
+۱۰. **GC تنبل** (`set_threshold(100k)` + `gc.freeze()`): حذف مکث‌های جمع‌آوری حافظه وسط ترافیک سنگین.
+
+> نکته‌ی سرور: برای فعال شدن BBR روی سرور لینوکس:
+> `sysctl -w net.core.default_qdisc=fq && sysctl -w net.ipv4.tcp_congestion_control=bbr`
+> و برای سقف بافرها: `sysctl -w net.core.rmem_max=16777216 net.core.wmem_max=16777216`
+
 ## نتیجه‌ی تست خودکار (لوپ‌بک)
 
 ```
@@ -37,4 +56,14 @@ split header      : resp-header=True match=True
 early-data (ed)   : resp-header=True match=True
 parallel connect  : first=0.9ms  cached=0.4ms
 throughput        : 64MB round-trip in 0.20s ≈ 315 MB/s هر جهت
+```
+
+بعد از پاس دوم:
+
+```
+single-frame header: match=True   used=2097190B   conns_left=0
+split header      : match=True   used=4194380B   conns_left=0
+early-data (ed)   : match=True   used=6291570B   conns_left=0
+parallel connect  : first=0.7ms  cached=0.3ms
+throughput        : 64MB round-trip in 0.15s ≈ 422 MB/s هر جهت  (+34%)
 ```

@@ -98,7 +98,8 @@ def _resp_headers(fp: str) -> dict:
 
 
 def _tune_socket(writer: asyncio.StreamWriter):
-    """TCP_NODELAY + بافرهای بزرگ‌تر سوکت برای کاهش سربار سیستم‌عامل روی ترافیک بالا."""
+    """تیون کامل سوکت مقصد — دقیقاً همان چیزی که در مسیر WebSocket اعمال می‌شود:
+    NODELAY + بافرهای بزرگ + QUICKACK + BBR + NOTSENT_LOWAT + IPTOS_LOWDELAY."""
     transport = getattr(writer, "transport", None)
     sock = transport.get_extra_info("socket") if transport else None
     if not sock:
@@ -107,6 +108,30 @@ def _tune_socket(writer: asyncio.StreamWriter):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCK_BUF_SIZE)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCK_BUF_SIZE)
+    except OSError:
+        pass
+    quickack = getattr(socket, "TCP_QUICKACK", None)
+    if quickack is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, quickack, 1)
+        except OSError:
+            pass
+    cc_opt = getattr(socket, "TCP_CONGESTION", None)
+    if cc_opt is not None:
+        for cc in (b"bbr", b"cubic"):
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, cc_opt, cc)
+                break
+            except OSError:
+                continue
+    lowat = getattr(socket, "TCP_NOTSENT_LOWAT", None)
+    if lowat is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, lowat, 512 * 1024)
+        except OSError:
+            pass
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10)
     except OSError:
         pass
 
@@ -163,7 +188,9 @@ def _validate(mode: str, session_id: str):
 async def _open_tcp_from_header(first_chunk: bytes):
     command, address, port, payload = await parse_vless_header(first_chunk)
     reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(address, port), timeout=TCP_CONNECT_TIMEOUT
+        # limit بزرگ: پیش‌فرض StreamReader فقط ۶۴KB است و روی لینک پرسرعت گلوگاه می‌شود
+        asyncio.open_connection(address, port, limit=XHTTP_BUF * 8),
+        timeout=TCP_CONNECT_TIMEOUT,
     )
     _tune_socket(writer)
     if payload:
@@ -401,7 +428,7 @@ async def _pump_request_to_tcp(uuid: str, session_id: str, sess: dict, request: 
             await flow.drain(writer)
 
 
-# ════════════════════════════ GET دانلینک (packet-up / stream-up / auto) ═════════════════
+# ════════════════════════════ GET دانلینک (packet-up / stream-up / auto) ════════════��════
 @router.get("/xhttp-siz10/{mode}/{uuid}/{session_id}")
 async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request):
     ensure_reaper()

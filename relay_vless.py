@@ -46,8 +46,10 @@ from speed_limit import throttle, QuotaGate
 # ══════════════════════════════════════════════════════════════════════════════
 
 READ_MIN = 256 * 1024              # کف بافر خواندن از مقصد
-READ_MAX = 4 * 1024 * 1024         # سقف بافر خواندن (حجم مهم نیست، سرعت مهم است)
-READ_START = 512 * 1024
+READ_MAX = 8 * 1024 * 1024         # سقف بافر خواندن (حجم مهم نیست، سرعت مهم است)
+READ_START = 1024 * 1024
+COALESCE_MAX = 8 * 1024 * 1024     # چند خواندن پشت‌سرهم در یک فریم WS ادغام می‌شود
+STREAM_LIMIT = 8 * 1024 * 1024     # سقف بافر داخلی StreamReader (پیش‌فرض asyncio فقط ۶۴KB است!)
 
 WRITE_HW_MIN = 256 * 1024          # کف high-water نوشتن روی TCP
 WRITE_HW_MAX = 32 * 1024 * 1024    # سقف high-water
@@ -55,13 +57,16 @@ WRITE_HW_START = 2 * 1024 * 1024
 FLOW_FAST_DRAIN_MS = 2.0
 FLOW_SLOW_DRAIN_MS = 25.0
 
-SOCK_BUF_SIZE = 8 * 1024 * 1024    # SO_SNDBUF / SO_RCVBUF
+SOCK_BUF_SIZE = 16 * 1024 * 1024   # SO_SNDBUF / SO_RCVBUF
+NOTSENT_LOWAT = 512 * 1024         # جلوگیری از bufferbloat بدون کم کردن توان عبوری
+PREFERRED_CC = (b"bbr", b"cubic")  # الگوریتم کنترل ازدحام مطلوب (BBR روی خطوط پرتلفات خیلی بهتر است)
 CONNECT_TIMEOUT = 10.0
 HEADER_TIMEOUT = 15.0
 HEADER_MAX = 16 * 1024             # سقف تجمیع برای پارس هدر VLESS
 
-PARALLEL_CONNECT = 3               # تعداد تلاش اتصال موازی به مقصد
-CONNECT_STAGGER = 0.12             # فاصله‌ی شروع تلاش‌ها (Happy-Eyeballs)
+PARALLEL_CONNECT = 4               # تعداد تلاش اتصال موازی به مقصد
+MIN_PARALLEL_CONNECT = 2           # حتی با یک IP هم دو تلاش موازی می‌زنیم (حذف دم تاخیر دست‌دادن)
+CONNECT_STAGGER = 0.06             # فاصله‌ی شروع تلاش‌ها (Happy-Eyeballs)
 DNS_TTL = 300.0                    # طول عمر کش DNS (ثانیه)
 DNS_CACHE_MAX = 4096
 
@@ -131,6 +136,25 @@ def _tune_socket(writer: asyncio.StreamWriter, high_water: int) -> None:
                 sock.setsockopt(socket.IPPROTO_TCP, quickack, 1)
             except OSError:
                 pass
+        # کنترل ازدحام BBR → روی خطوط با پرت بسته چندبرابر سریع‌تر از CUBIC است
+        cc_opt = getattr(socket, "TCP_CONGESTION", None)
+        if cc_opt is not None:
+            for cc in PREFERRED_CC:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, cc_opt, cc)
+                    break
+                except OSError:
+                    continue
+        lowat = getattr(socket, "TCP_NOTSENT_LOWAT", None)
+        if lowat is not None:
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, lowat, NOTSENT_LOWAT)
+            except OSError:
+                pass
+        try:  # IPTOS_LOWDELAY
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10)
+        except OSError:
+            pass
     try:
         transport.set_write_buffer_limits(high=high_water, low=high_water // 4)
     except Exception:
@@ -152,11 +176,48 @@ def _tune_client_socket(ws: WebSocket) -> None:
     except Exception:
         sock = None
     if sock is None:
+        # uvicorn (هر دو پیاده‌سازی websockets و wsproto) سوکت را در scope نمی‌گذارد؛
+        # از دل callable‌های ASGI به آبجکت پروتکل و transport واقعی می‌رسیم.
+        for attr in ("_send", "_receive"):
+            try:
+                owner = getattr(getattr(ws, attr, None), "__self__", None)
+                transport = getattr(owner, "transport", None)
+                if transport is not None and hasattr(transport, "get_extra_info"):
+                    sock = transport.get_extra_info("socket")
+                    if sock is not None:
+                        break
+            except Exception:
+                continue
+    if sock is None:
         return
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCK_BUF_SIZE)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCK_BUF_SIZE)
+    except OSError:
+        pass
+    quickack = getattr(socket, "TCP_QUICKACK", None)
+    if quickack is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, quickack, 1)
+        except OSError:
+            pass
+    cc_opt = getattr(socket, "TCP_CONGESTION", None)
+    if cc_opt is not None:
+        for cc in PREFERRED_CC:
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, cc_opt, cc)
+                break
+            except OSError:
+                continue
+    lowat = getattr(socket, "TCP_NOTSENT_LOWAT", None)
+    if lowat is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, lowat, NOTSENT_LOWAT)
+        except OSError:
+            pass
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10)
     except OSError:
         pass
 
@@ -188,16 +249,23 @@ async def _open_upstream(address: str, port: int):
         addrs = []
     if not addrs:
         return await asyncio.wait_for(
-            asyncio.open_connection(address, port), timeout=CONNECT_TIMEOUT
+            asyncio.open_connection(address, port, limit=STREAM_LIMIT),
+            timeout=CONNECT_TIMEOUT,
         )
 
     candidates = addrs[:PARALLEL_CONNECT]
+    # حجم مهم نیست: اگر فقط یک IP داریم هم، چند دست‌دادن موازی می‌زنیم و
+    # سریع‌ترین را نگه می‌داریم → حذف دم تاخیر (tail latency) در اتصال‌های کند.
+    while len(candidates) < MIN_PARALLEL_CONNECT:
+        candidates = candidates + [candidates[0]]
 
     async def attempt(idx: int, fam, sockaddr):
         if idx:
             await asyncio.sleep(CONNECT_STAGGER * idx)
         host = sockaddr[0]
-        return await asyncio.open_connection(host=host, port=sockaddr[1], family=fam)
+        return await asyncio.open_connection(
+            host=host, port=sockaddr[1], family=fam, limit=STREAM_LIMIT
+        )
 
     tasks = {
         asyncio.create_task(attempt(i, fam, sa)) for i, (fam, sa) in enumerate(candidates)
@@ -364,6 +432,19 @@ async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: 
             data = await reader.read(bufsize)
             if not data:
                 break
+            # ادغام (coalescing): هر چه همین الان در بافر هست را در همین یک فریم WS
+            # می‌فرستیم → تعداد فریم/syscall به‌شدت کمتر می‌شود (بدون هیچ انتظار اضافی).
+            if getattr(reader, "_buffer", None):
+                parts = [data]
+                total = len(data)
+                while total < COALESCE_MAX and getattr(reader, "_buffer", None):
+                    more = await reader.read(min(bufsize, COALESCE_MAX - total))
+                    if not more:
+                        break
+                    parts.append(more)
+                    total += len(more)
+                if len(parts) > 1:
+                    data = b"".join(parts)
             ticks += 1
             if not (ticks & 63):
                 limited = _speed_limited(uid)
